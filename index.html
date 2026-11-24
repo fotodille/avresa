@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Avresa">
+<meta name="theme-color" content="#1c2024">
+<title>Bästa avresetid</title>
+<style>
+/* Färger: asfalt (mörk bakgrund), vägmarkeringsgul som accent, grön/gul/röd för risk */
+:root{--bg:#1c2024;--card:#262b31;--ink:#eef0f2;--dim:#9aa3ad;--line:#353b42;
+  --accent:#f5c518;--ok:#3fae5a;--warn:#e0a526;--bad:#d9483b;--sleep:#4a5058}
+*{box-sizing:border-box;min-width:0}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  padding:max(16px,env(safe-area-inset-top)) 16px 40px}
+main{max-width:640px;margin:0 auto}
+h1{font-size:26px;line-height:1.1;margin:4px 0 14px}
+.route{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+button{font:inherit;min-height:44px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
+button.on{background:var(--accent);color:#1c2024;border-color:var(--accent);font-weight:600}
+.settings{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;color:var(--dim);font-size:14px;margin-bottom:16px}
+.settings label{display:flex;gap:6px;align-items:center}
+select{font:inherit;font-size:16px;min-height:40px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:0 6px}
+.summary{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:18px}
+.box{background:var(--card);border-radius:12px;padding:12px;border-left:5px solid var(--line)}
+.box b{display:block;font-size:22px;white-space:nowrap}
+.box small{color:var(--dim)}
+.box.best{border-left-color:var(--ok)}.box.worst{border-left-color:var(--bad)}
+h2{font-size:15px;color:var(--dim);font-weight:600;margin:18px 0 6px}
+.row{display:grid;grid-template-columns:52px 1fr 44px;gap:10px;align-items:center;padding:8px 10px;border-radius:8px;margin-bottom:4px;background:var(--card);border-left:5px solid}
+.row .t{font-weight:600;font-variant-numeric:tabular-nums}
+.row .why{font-size:14px;color:var(--dim);line-height:1.3}
+.row .s{text-align:right;font-variant-numeric:tabular-nums;font-size:14px}
+.g{border-left-color:var(--ok)}.y{border-left-color:var(--warn)}.r{border-left-color:var(--bad)}
+.z{border-left-color:var(--sleep);opacity:.45}
+.msg{color:var(--dim);padding:20px 0}
+.foot{color:var(--dim);font-size:13px;margin-top:24px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Bästa avresetid</h1>
+  <div class="route">
+    <button id="dirA" class="on">Vällingby → Lidköping</button>
+    <button id="dirB">Lidköping → Vällingby</button>
+  </div>
+  <div class="settings">
+    <label>Sover från <select id="sleepFrom"></select></label>
+    <label>till <select id="sleepTo"></select></label>
+    <label><input type="checkbox" id="showSleep"> visa sovtider</label>
+  </div>
+  <div class="summary" id="summary"></div>
+  <div id="list"><p class="msg">Hämtar prognoser från SMHI …</p></div>
+  <p class="foot">Väder: SMHI öppna data (SNOW1g). Poängen är en grov uppskattning av halk- och väderrisk, 0 = bra, 100 = mycket dåligt. Kolla alltid Trafikverkets väglag innan avresa.</p>
+</main>
+
+<script>
+{
+/* ===== Inställningar: rutten som punkter med ungefärlig körtid (minuter) från Vällingby ===== */
+const ROUTE = [
+  {name:"Vällingby", lat:59.363, lon:17.872, min:0},
+  {name:"Enköping",  lat:59.636, lon:17.077, min:40},
+  {name:"Västerås",  lat:59.611, lon:16.545, min:65},
+  {name:"Köping",    lat:59.514, lon:15.996, min:90},
+  {name:"Arboga",    lat:59.394, lon:15.839, min:100},
+  {name:"Örebro",    lat:59.274, lon:15.207, min:120},
+  {name:"Hova",      lat:58.856, lon:14.213, min:165},
+  {name:"Mariestad", lat:58.709, lon:13.823, min:185},
+  {name:"Götene",    lat:58.528, lon:13.494, min:200},
+  {name:"Lidköping", lat:58.505, lon:13.157, min:215}
+];
+const TOTAL = ROUTE[ROUTE.length-1].min;
+const HOURS_AHEAD = 48, STEP_MIN = 30;
+const API = (lat,lon)=>`https://opendata-download-metfcst.smhi.se/api/category/snow1g/version/1/geotype/point/lon/${lon}/lat/${lat}/data.json`;
+
+const $ = id=>document.getElementById(id);
+const pad = n=>String(n).padStart(2,"0");
+const hhmm = d=>pad(d.getHours())+":"+pad(d.getMinutes());
+const DAYS = ["sön","mån","tis","ons","tor","fre","lör"];
+const dayName = d=>DAYS[d.getDay()]+" "+d.getDate()+"/"+(d.getMonth()+1);
+
+/* ===== Spara/läs inställningar i mobilens webbläsare ===== */
+const store = {
+  get(k,def){try{const v=localStorage.getItem("avresa_"+k);return v===null?def:JSON.parse(v)}catch(e){return def}},
+  set(k,v){try{localStorage.setItem("avresa_"+k,JSON.stringify(v))}catch(e){}}
+};
+let state = {dir:store.get("dir","A"), sleepFrom:store.get("sleepFrom",23), sleepTo:store.get("sleepTo",7), showSleep:store.get("showSleep",false)};
+let forecasts = null;   // en prognoslista per ruttpunkt
+
+/* ===== Solens höjd över horisonten (grader), för mörker och rimfrost ===== */
+function sunElevation(date, lat, lon){
+  const rad = Math.PI/180;
+  const start = Date.UTC(date.getUTCFullYear(),0,0);
+  const doy = (date - start)/864e5;
+  const decl = 23.44*Math.sin(rad*360/365*(doy-81));
+  const solarHour = date.getUTCHours() + date.getUTCMinutes()/60 + lon/15;
+  const ha = (solarHour-12)*15;
+  const s = Math.sin(lat*rad)*Math.sin(decl*rad) + Math.cos(lat*rad)*Math.cos(decl*rad)*Math.cos(ha*rad);
+  return Math.asin(s)/rad;
+}
+
+/* ===== Hitta prognossteget närmast en viss tidpunkt ===== */
+function nearest(series, t){
+  let best = series[0], bd = Infinity;
+  for(const s of series){const d = Math.abs(s.t - t); if(d < bd){bd = d; best = s}}
+  return best;
+}
+
+/* ===== Riskpoäng (0–100) för en punkt vid en tidpunkt, med orsaker ===== */
+function pointRisk(series, t, p){
+  const s = nearest(series, t), d = s.d;
+  const T = d.air_temperature, pr = d.precipitation_amount_mean ?? 0;
+  const type = d.predominant_precipitation_type_at_surface, frozen = d.precipitation_frozen_part ?? 0;
+  const cloud = d.cloud_area_fraction ?? 8, rh = d.relative_humidity ?? 0;
+  const gust = d.wind_speed_of_gust ?? 0, vis = d.visibility_in_air ?? 50;
+  const sun = sunElevation(new Date(t), p.lat, p.lon);
+  const why = []; let r = 0;
+  const add = (pts, text)=>{r += pts; why.push([pts, text])};
+
+  if(pr >= 0.1 && (type === 5 || type === 6)) add(70, "underkylt regn");
+  else if(pr >= 0.1 && (frozen >= 50 || T <= 0.5)){
+    add(Math.min(50, 15 + pr*25), "snöfall");
+    if(gust >= 12) add(15, "snödrev");
+  }
+  else if(pr >= 0.1 && T > -1 && T < 2) add(30, "regn nära nollan");
+
+  // Rimfrost/svart is: klar natt, minusgrader, fuktig luft
+  if(pr < 0.1 && T > -8 && T < 1 && cloud <= 3 && sun < 0 && rh >= 80) add(30, "rimfrostrisk");
+  else if(T > -3 && T < 1 && why.length === 0) add(10, "kring nollan");
+
+  // Snö de senaste 6 timmarna gör vägen sämre även om det slutat
+  const recent = series.filter(x => x.t < s.t && x.t >= s.t - 6*36e5);
+  const fell = recent.reduce((a,x)=>a + ((x.d.precipitation_amount_mean ?? 0) * ((x.d.air_temperature ?? 5) <= 0.5 ? 1 : 0)), 0);
+  if(fell >= 1 && pr < 0.1) add(Math.min(20, fell*5), "nyfallen snö");
+
+  if(vis < 1) add(20, "dålig sikt");
+  if(sun < -6) add(8, "mörker");
+  return {r: Math.min(100, r), why, T, place: p.name, time: new Date(t)};
+}
+
+/* ===== Poäng för en hel resa med given avresetid ===== */
+function tripScore(dep){
+  const pts = state.dir === "A" ? ROUTE : ROUTE.map(p => ({...p, min: TOTAL - p.min})).reverse();
+  const order = state.dir === "A" ? forecasts : [...forecasts].reverse();
+  const risks = pts.map((p,i) => pointRisk(order[i], dep + p.min*6e4, p));
+  const worst = risks.reduce((a,b) => b.r > a.r ? b : a);
+  const mean = risks.reduce((a,b) => a + b.r, 0)/risks.length;
+  const score = Math.round(worst.r*0.6 + mean*0.4);
+  const main = worst.why.sort((a,b)=>b[0]-a[0])[0];
+  const why = main ? `${main[1]} vid ${worst.place} ${hhmm(worst.time)} (${Math.round(worst.T)}°)` : "inga tydliga risker";
+  return {score, why};
+}
+
+/* ===== Krockar resan med sömnfönstret? ===== */
+function inSleep(dep){
+  for(let m = 0; m <= TOTAL; m += 15){
+    const h = new Date(dep + m*6e4).getHours();
+    const {sleepFrom:a, sleepTo:b} = state;
+    if(a === b) return false;
+    if(a < b ? (h >= a && h < b) : (h >= a || h < b)) return true;
+  }
+  return false;
+}
+
+/* ===== Rita listan med alla avresetider ===== */
+function render(){
+  if(!forecasts) return;
+  const now = new Date(); now.setSeconds(0,0);
+  now.setMinutes(Math.ceil(now.getMinutes()/STEP_MIN)*STEP_MIN);
+  const lastData = Math.min(...forecasts.map(f => f[f.length-1].t));
+  const rows = [];
+  for(let dep = now.getTime(); dep <= now.getTime() + HOURS_AHEAD*36e5 && dep + TOTAL*6e4 <= lastData; dep += STEP_MIN*6e4){
+    rows.push({dep, sleep: inSleep(dep), ...tripScore(dep)});
+  }
+  const awake = rows.filter(r => !r.sleep);
+  const cls = r => r.sleep ? "z" : r.score < 20 ? "g" : r.score < 40 ? "y" : "r";
+
+  if(awake.length){
+    const best = awake.reduce((a,b) => b.score < a.score ? b : a);
+    const worst = awake.reduce((a,b) => b.score > a.score ? b : a);
+    const box = (r,c,label) => `<div class="box ${c}"><small>${label}</small><b>${dayName(new Date(r.dep))} ${hhmm(new Date(r.dep))}</b><small>${r.why}</small></div>`;
+    $("summary").innerHTML = box(best,"best","Bäst") + box(worst,"worst","Sämst");
+  } else $("summary").innerHTML = "";
+
+  let html = "", lastDay = "";
+  for(const r of rows){
+    if(r.sleep && !state.showSleep) continue;
+    const d = new Date(r.dep), day = dayName(d);
+    if(day !== lastDay){html += `<h2>${day}</h2>`; lastDay = day}
+    html += `<div class="row ${cls(r)}"><span class="t">${hhmm(d)}</span><span class="why">${r.sleep ? "sovtid" : r.why}</span><span class="s">${r.score}</span></div>`;
+  }
+  $("list").innerHTML = html || `<p class="msg">Inga avresetider att visa.</p>`;
+}
+
+/* ===== Hämta SMHI-prognoser för alla ruttpunkter samtidigt ===== */
+async function load(){
+  try{
+    forecasts = await Promise.all(ROUTE.map(async p => {
+      const res = await fetch(API(p.lat, p.lon));
+      if(!res.ok) throw new Error("SMHI svarade " + res.status);
+      const j = await res.json();
+      return j.timeSeries.map(s => ({t: Date.parse(s.time ?? s.validTime), d: s.data}));
+    }));
+    render();
+  }catch(e){
+    $("list").innerHTML = `<p class="msg">Kunde inte hämta prognoser: ${String(e.message).replace(/</g,"&lt;")}</p>`;
+  }
+}
+
+/* ===== Knappar och inställningar ===== */
+for(const id of ["sleepFrom","sleepTo"]){
+  $(id).innerHTML = Array.from({length:24}, (_,h) => `<option value="${h}">${pad(h)}:00</option>`).join("");
+  $(id).value = state[id];
+  $(id).onchange = e => {state[id] = +e.target.value; store.set(id, state[id]); render()};
+}
+$("showSleep").checked = state.showSleep;
+$("showSleep").onchange = e => {state.showSleep = e.target.checked; store.set("showSleep", state.showSleep); render()};
+const setDir = d => {state.dir = d; store.set("dir", d); $("dirA").classList.toggle("on", d==="A"); $("dirB").classList.toggle("on", d==="B"); render()};
+$("dirA").onclick = () => setDir("A");
+$("dirB").onclick = () => setDir("B");
+setDir(state.dir);
+load();
+}
+</script>
+</body>
+</html>
